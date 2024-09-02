@@ -1,31 +1,80 @@
 import React, { useEffect, useState } from 'react';
 import axios from 'axios';
-import { Bar } from 'react-chartjs-2';
-import { Chart as ChartJS, CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend } from 'chart.js';
-import jsPDF from 'jspdf';
-import html2canvas from 'html2canvas';
+import { jsPDF } from 'jspdf';
+import autoTable from 'jspdf-autotable';
 import * as XLSX from 'xlsx';
+import {jwtDecode} from 'jwt-decode'; // Import jwt-decode
 import TopNav from '../components/TopNav';
 import BottomNav from '../components/BottomNav';
+import config from '../config';
 
-ChartJS.register(CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend);
-
-const PerformanceDisplay = () => {
-  const [performanceData, setPerformanceData] = useState(null);
+const ModelPerformanceData = () => {
+  const [data, setData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [selectedPeriod, setSelectedPeriod] = useState('quarter');
+  const [period, setPeriod] = useState('month'); 
 
   useEffect(() => {
-    const fetchPerformanceData = async () => {
+    const fetchData = async () => {
       try {
-        const token = localStorage.getItem('Dealertoken'); // Retrieve token from local storage
-        const response = await axios.get(`http://localhost:5000/api/dealer/performance/all/models?period=${selectedPeriod}`, {
+        const token = localStorage.getItem('Dealertoken');
+        if (!token) {
+          throw new Error('No token found');
+        }
+
+        const decodedToken = jwtDecode(token);
+        const dealerId = decodedToken.id; 
+
+        let startDate, endDate;
+
+        // Set dates based on the selected period
+        const now = new Date();
+        switch (period) {
+          case 'week':
+            startDate = new Date(now.setDate(now.getDate() - 7)).toISOString();
+            endDate = new Date().toISOString();
+            break;
+          case 'month':
+            startDate = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+            endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString();
+            break;
+          case 'quarter':
+            const quarter = Math.floor((now.getMonth() + 3) / 3);
+            startDate = new Date(now.getFullYear(), (quarter - 1) * 3, 1).toISOString();
+            endDate = new Date(now.getFullYear(), quarter * 3, 0).toISOString();
+            break;
+          case 'year':
+            startDate = new Date(now.getFullYear(), 0, 1).toISOString();
+            endDate = new Date(now.getFullYear(), 11, 31).toISOString();
+            break;
+          case 'lifetime':
+            startDate = undefined;
+            endDate = undefined;
+            break;
+          default:
+            startDate = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+            endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString();
+        }
+
+        const params = {
+          dealerId: dealerId,
+          period: period
+        };
+
+        if (startDate && endDate) {
+          params.startDate = startDate;
+          params.endDate = endDate;
+        }
+
+        const response = await axios.get(
+          `${config.BASE_URL}/api/dealer/model-performance`, {
+          params: params,
           headers: {
-            'Authorization': `Bearer ${token}` // Use token in the Authorization header
-          }
+            'Authorization': `Bearer ${token}`,
+          },
         });
-        setPerformanceData(response.data);
+
+        setData(response.data.performanceData);
       } catch (error) {
         setError(error);
       } finally {
@@ -33,178 +82,150 @@ const PerformanceDisplay = () => {
       }
     };
 
-    fetchPerformanceData();
-  }, [selectedPeriod]);
+    fetchData();
+  }, [period]); // Re-fetch data when the period changes
 
   const handlePeriodChange = (event) => {
-    setSelectedPeriod(event.target.value);
-    setLoading(true);
+    setPeriod(event.target.value);
   };
 
-  const formatDate = (dateString) => {
-    const options = { day: 'numeric', month: 'long', year: 'numeric' };
-    const date = new Date(dateString);
-    return new Intl.DateTimeFormat('en-GB', options).format(date);
+  const exportPDF = () => {
+    if (!data.length) return;
+
+    const doc = new jsPDF();
+    doc.text('Model Performance Data', 20, 10);
+
+    const tableData = data.map((item, index) => [
+      index + 1,
+      item.modelName,
+      item.totalQuantity,
+      item.totalAmount,
+      item.modelPrice,
+    ]);
+
+    autoTable(doc, {
+      head: [['Rank', 'Model', 'Stock Sold', 'Amount', 'Model Price']],
+      body: tableData,
+      startY: 20,
+    });
+
+    doc.save('model_performance_data.pdf');
   };
 
-  const getBarChartData = () => {
-    if (!performanceData) return {};
+  const exportExcel = () => {
+    if (!data.length) return;
 
-    const labels = performanceData.performanceData.map(data => data.modelName);
-    const data = performanceData.performanceData.map(data => data.totalQuantity);
+    const worksheetData = data.map((item, index) => ({
+      Rank: index + 1,
+      Model: item.modelName,
+      'Stock Sold': item.totalQuantity,
+      Amount: item.totalAmount,
+      'Model Price': item.modelPrice,
+    }));
 
-    return {
-      labels: labels,
-      datasets: [{
-        label: 'Total Quantity',
-        data: data,
-        backgroundColor: '#42a5f5',
-        borderColor: '#42a5f5',
-        borderWidth: 1,
-        barThickness: 20,
-      }]
-    };
+    const worksheet = XLSX.utils.json_to_sheet(worksheetData);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Model Performance Data');
+    XLSX.writeFile(workbook, 'model_performance_data.xlsx');
   };
 
-  const handleExportToPDF = async () => {
-    const input = document.getElementById('performanceTable');
-    const canvas = await html2canvas(input);
-    const data = canvas.toDataURL('image/png');
-    const pdf = new jsPDF();
-    pdf.addImage(data, 'PNG', 0, 0);
-    pdf.save('performance-data.pdf');
-  };
+  if (loading) return <p>Loading...</p>;
+  if (error) return <p>Error loading data: {error.message}</p>;
 
-  const handleExportToExcel = () => {
-    const ws = XLSX.utils.json_to_sheet(
-      performanceData.performanceData.map(data => ({
-        'Model Name': data.modelName,
-        'Total Quantity': data.totalQuantity,
-        'Total Amount': data.totalAmount,
-        'Model Price': data.modelPrice,
-      }))
-    );
-
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Performance Data');
-    XLSX.writeFile(wb, 'performance-data.xlsx');
-  };
-
-  if (loading) return  <div className="flex items-center justify-center h-screen">
-        <div className="w-16 h-16 border-4 border-teal-500 border-t-transparent border-solid rounded-full animate-spin"></div>
-      </div>;
-  if (error) return <p className="text-center text-red-500">Error: {error.message}</p>;
+  const maxQuantity = Math.max(...data.map(item => item.totalQuantity));
+  const minWidth = 5; // Minimum width in percentage
 
   return (
-    <div className="p-4 max-w-4xl mx-auto">
-      <TopNav /> {/* Add TopNav component here */}
+    <>
+      <TopNav />
+      <div className="p-6 bg-white shadow-md rounded-lg mb-16 mt-16">
+        <h1 className="text-2xl font-bold mb-4">Model Performance Data</h1>
 
-      <h1 className="text-2xl font-bold mb-4 mt-16">Performance Data</h1>
+    <div className="mb-6 flex flex-col md:flex-row justify-between space-y-4 md:space-y-0">
+  <div className="flex flex-col md:flex-row w-full">
+    <label className="block md:flex mb-2 md:mb-0 md:mr-4 w-full">
+      <select
+        value={period}
+        onChange={handlePeriodChange}
+        className="w-full p-2 border border-gray-300 rounded-md"
+      >
+        <option value="week">Week</option>
+        <option value="month">Month</option>
+        <option value="quarter">Quarter</option>
+        <option value="year">Year</option>
+        <option value="lifetime">Lifetime</option>
+      </select>
+    </label>
+  </div>
+</div>
 
-      <div className="mb-4">
-        <label htmlFor="period" className="block text-gray-700 mb-2">Select Period:</label>
-        <select
-          id="period"
-          value={selectedPeriod}
-          onChange={handlePeriodChange}
-          className="border border-gray-300 rounded-lg p-2"
-        >
-          <option value="week">This Week</option>
-          <option value="month">This Month</option>
-          <option value="quarter">This Quarter</option>
-          <option value="year">This Year</option>
-          <option value="lifetime">Lifetime</option>
-        </select>
-      </div>
 
-      {performanceData && (
-        <p className="text-gray-600 mb-2">
-          Period: {formatDate(performanceData.startDate)} to {formatDate(performanceData.endDate)}
-        </p>
-      )}
+        <div className="space-y-4">
+          {data.map((item, index) => {
+            const width = `${Math.max((item.totalQuantity / maxQuantity) * 100, minWidth)}%`;
 
-      <div className="mb-6">
-        <Bar
-          data={getBarChartData()}
-          options={{
-            indexAxis: 'y',
-            responsive: true,
-            plugins: {
-              legend: {
-                display: false,
-              },
-              tooltip: {
-                callbacks: {
-                  label: function(tooltipItem) {
-                    return `${tooltipItem.label}: ${tooltipItem.raw} pcs`;
-                  }
-                }
-              }
-            },
-            scales: {
-              x: {
-                title: {
-                  display: true,
-                  text: 'Total Quantity',
-                },
-                beginAtZero: true,
-                grid: {
-                  color: ['#d4e157', '#ffeb3b', '#f44336'],
-                  lineWidth: 2,
-                }
-              },
-              y: {
-                title: {
-                  display: false,
-                },
-                beginAtZero: true,
-              }
-            }
-          }}
-        />
-      </div>
+            return (
+              <div key={item.modelId} className="flex items-center">
+                <div className="flex-grow bg-gray-200 h-8 rounded-lg relative">
+                  <div
+                    className="bg-blue-500 h-full rounded-lg"
+                    style={{ width }}
+                  >
+                    <span className="absolute left-2 top-1/2 transform -translate-y-1/2 text-sm font-medium text-white">
+                      {item.modelName}
+                    </span>
+                  </div>
+                </div>
+                <span className="ml-3">{item.totalQuantity} Pcs</span>
+              </div>
+            );
+          })}
+        </div>
 
-      <div className="mb-4">
-        <button
-          onClick={handleExportToExcel}
-          className="p-2 bg-green-500 text-white rounded-lg"
-        >
-          Export to Excel
-        </button>
-        <button
-          onClick={handleExportToPDF}
-          className="ml-2 p-2 bg-blue-500 text-white rounded-lg"
-        >
-          Export to PDF
-        </button>
-      </div>
+        <div className="flex justify-end space-x-4 my-4">
+          <button
+            onClick={exportPDF}
+            className="bg-red-500 text-white py-2 px-4 rounded-md"
+          >
+            Export PDF
+          </button>
+          <button
+            onClick={exportExcel}
+            className="bg-green-500 text-white py-2 px-4 rounded-md"
+          >
+            Export Excel
+          </button>
+        </div>
 
-      <div className="overflow-x-auto mb-16">
-        <table id="performanceTable" className="min-w-full bg-white border border-gray-200 rounded-lg shadow-md">
-          <thead className="bg-gray-100 border-b border-gray-200">
-            <tr>
-              <th className="px-4 py-2 text-left text-gray-600">Model Name</th>
-              <th className="px-4 py-2 text-left text-gray-600">Total Quantity</th>
-              <th className="px-4 py-2 text-left text-gray-600">Total Amount</th>
-              <th className="px-4 py-2 text-left text-gray-600">Model Price</th>
-            </tr>
-          </thead>
-          <tbody>
-            {performanceData.performanceData.map((data, index) => (
-              <tr key={index} className="border-b border-gray-200">
-                <td className="px-4 py-2">{data.modelName}</td>
-                <td className="px-4 py-2">{data.totalQuantity}</td>
-                <td className="px-4 py-2">₹{data.totalAmount.toLocaleString()}</td>
-                <td className="px-4 py-2">₹{data.modelPrice.toLocaleString()}</td>
+        <div className="overflow-x-auto mt-8">
+          <h2 className="text-xl font-bold mb-4">Detailed Model Performance Data</h2>
+          <table className="min-w-full bg-white border border-gray-200 text-sm">
+            <thead>
+              <tr className="bg-gray-100 text-gray-700">
+                <th className="py-2 px-4 border-b">Rank</th>
+                <th className="py-2 px-4 border-b">Model</th>
+                <th className="py-2 px-4 border-b">Stock Sold</th>
+                <th className="py-2 px-4 border-b">Amount</th>
+                <th className="py-2 px-4 border-b">Model Price</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody className="text-center">
+              {data.map((item, index) => (
+                <tr key={item.modelId} className="text-gray-700">
+                  <td className="py-2 px-4 border-b">{index + 1}</td>
+                  <td className="py-2 px-4 border-b">{item.modelName}</td>
+                  <td className="py-2 px-4 border-b">{item.totalQuantity}</td>
+                  <td className="py-2 px-4 border-b">{item.totalAmount}</td>
+                  <td className="py-2 px-4 border-b">{item.modelPrice}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
-
-      <BottomNav /> {/* Add BottomNav component here */}
-    </div>
+      <BottomNav />
+    </>
   );
 };
 
-export default PerformanceDisplay;
+export default ModelPerformanceData;
